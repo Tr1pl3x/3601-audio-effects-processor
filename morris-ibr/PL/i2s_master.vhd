@@ -32,8 +32,8 @@ entity i2s_master is
 end i2s_master;
 
 architecture Behavioral of i2s_master is
-    constant BCLK_DIVIDER : integer := 4; -- System clock to bit clock divider
-    constant LRCLK_DIVIDER : integer := 64; -- Bit clock to word clock divider
+    constant BCLK_DIVIDER : integer := 16; -- System clock to bit clock divider --was 4
+    constant LRCLK_DIVIDER : integer := 64; -- Bit clock to word clock divider --was 64
     
     signal bclk_counter : unsigned(7 downto 0) := (others => '0');
     signal lrclk_counter : unsigned(7 downto 0) := (others => '0');
@@ -86,7 +86,7 @@ begin
             case state is
                 when IDLE =>
                     sample_ready <= '0';
-                    if lrclk_int = '0' and bclk_int = '1' and bclk_counter = 0 then
+                    if (lrclk_int = '0') and bclk_int = '1' and bclk_counter = 0 then
                         state <= SHIFTING;
                         bit_counter <= (others => '0');
                         shift_reg <= (others => '0');
