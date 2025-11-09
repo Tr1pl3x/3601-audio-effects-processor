@@ -1,0 +1,320 @@
+/******************************************************************************
+* Copyright (C) 2023 Advanced Micro Devices, Inc. All Rights Reserved.
+* SPDX-License-Identifier: MIT
+******************************************************************************/
+/*
+ * helloworld.c: simple test application
+ *
+ * This application configures UART 16550 to baud rate 9600.
+ * PS7 UART (Zynq) is not initialized by this application, since
+ * bootrom/bsp configures it to baud rate 115200
+ *
+ * ------------------------------------------------
+ * | UART TYPE   BAUD RATE                        |
+ * ------------------------------------------------
+ *   uartns550   9600
+ *   uartlite    Configurable only in HW design
+ *   ps7_uart    115200 (configured by bootrom/bsp)
+ */
+
+#include <stdio.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "xaxidma.h"
+#include "sleep.h"
+#include "ff.h"
+#include "xsdps.h"
+#include "xparameters.h"
+#include "xil_io.h"
+
+#define BUF_SIZE 1440768 //48000 * 30
+#define BATCH_SIZE 1024
+
+//volatile char tx_buf[BUF_SIZE] = {}; //not needed
+volatile uint32_t rx_buf[BUF_SIZE] = {};
+
+//for sd
+static FIL fil;
+static FATFS fatfs;
+MKFS_PARM mkfs_parm;
+
+//constants
+#define SAMPLE_SIZE 32
+#define SAMPLE_PMC 18
+#define EXTRA_BITS SAMPLE_SIZE - SAMPLE_PMC
+#define SAMPLE_RATE 48000
+
+//Audio pipeline control registers
+//Base address from xparameters.h: XPAR_AUDIO_PIPELINE_0_BASEADDR
+#define AUDIO_PIPELINE_BASEADDR XPAR_AUDIO_PIPELINE_0_BASEADDR  // 0xA0000000
+#define GAIN_REG_OFFSET 0x0C  // slv_reg3 at offset 0x0C
+
+//Gain values in Q16.16 fixed-point format
+//Format: 16 integer bits + 16 fractional bits
+#define GAIN_MUTE    0x00000000  // 0.0x - Mute
+#define GAIN_HALF    0x00008000  // 0.5x - Half volume
+#define GAIN_UNITY   0x00010000  // 1.0x - No change (default)
+#define GAIN_1_5X    0x00018000  // 1.5x - 50% boost
+#define GAIN_2X      0x00020000  // 2.0x - Double volume
+#define GAIN_4X      0x00040000  // 4.0x - Quadruple volume
+#define GAIN_8X      0x00080000  // 8.0x - 8x boost (may clip/saturate)
+
+// ============================================
+// GAIN CONFIGURATION - Change this value to adjust audio volume
+// ============================================
+// Options: GAIN_MUTE, GAIN_HALF, GAIN_UNITY, GAIN_1_5X, GAIN_2X, GAIN_4X, GAIN_8X
+// Or use custom value: (uint32_t)(desired_gain * 65536)
+// Examples:
+//   - For 10x gain: (uint32_t)(10.0 * 65536)
+//   - For 0.25x gain: (uint32_t)(0.25 * 65536)
+//   - For 16x gain: (uint32_t)(16.0 * 65536)
+const uint32_t AUDIO_GAIN = GAIN_4X;  // <<< CHANGE THIS VALUE TO ADJUST GAIN
+
+//wav file header
+//http://soundfile.sapp.org/doc/WaveFormat/
+typedef struct {
+    char chunkID[4];        // "RIFF"
+    uint32_t chunkSize;  	// 36 + data size
+    char format[4];         // "WAVE"
+    char subChunk1ID[4];    // "fmt "
+    uint32_t subchunk1Size; // 16
+    uint16_t audioFormat;   // 1 = PCM
+    uint16_t numChannels;   // 1 or 2
+    uint32_t sampleRate;    // e.g., 48000
+    uint32_t byteRate;      // sampleRate * numChannels * bitsPerSample/8
+    uint16_t blockAlign;    // numChannels * bitsPerSample/8
+    uint16_t bitsPerSample; // bits per sample (precision)
+    char subchunk2ID [4];   // "data"
+    uint32_t subchunk2Size;      // bytes of PCM data
+} WAVHeader;
+
+/**
+ * Set the audio gain via memory-mapped register write
+ * @param gain_value: Q16.16 fixed-point gain coefficient
+ *                    Use predefined constants (GAIN_MUTE, GAIN_UNITY, etc.)
+ *                    or calculate custom value: (int)(desired_gain * 65536)
+ *
+ * Example usage:
+ *   set_audio_gain(GAIN_UNITY);   // 1.0x gain (no change)
+ *   set_audio_gain(GAIN_HALF);    // 0.5x gain (reduce volume)
+ *   set_audio_gain(GAIN_2X);      // 2.0x gain (double volume)
+ */
+void set_audio_gain(uint32_t gain_value) {
+    // Write to gain register via AXI4-Lite
+    Xil_Out32(AUDIO_PIPELINE_BASEADDR + GAIN_REG_OFFSET, gain_value);
+    xil_printf("Gain set to 0x%08X (", gain_value);
+
+    // Print human-readable gain value
+    float gain_float = (float)gain_value / 65536.0f;
+    xil_printf("%.2fx)\r\n", gain_float);
+}
+
+/**
+ * Read current gain setting from hardware register
+ * @return current gain value in Q16.16 format
+ */
+uint32_t get_audio_gain(void) {
+    return Xil_In32(AUDIO_PIPELINE_BASEADDR + GAIN_REG_OFFSET);
+}
+
+void dma() {
+	//declare necessary variables
+	int Status = XST_SUCCESS;
+	XAxiDma_Config *CfgPtr;
+	XAxiDma AxiDma;
+
+	//no scatter-gather
+	CfgPtr = XAxiDma_LookupConfig(XPAR_AXI_DMA_0_DEVICE_ID);
+	if (!CfgPtr) {
+		print("No CfgPtr");
+	    return;
+	}
+
+	Status = XAxiDma_CfgInitialize(&AxiDma, CfgPtr);
+	    if (Status != XST_SUCCESS) {
+	        print("DMA cfg init failure");
+	        return;
+	   }
+
+	   if (XAxiDma_HasSg(&AxiDma)) {
+	       print("Device configured as SG mode \r\n");
+	       return;
+	   }
+
+	   print("DMA initialised\r\n");
+
+	   //self test to check if it is configured properly
+	   Status = XAxiDma_Selftest(&AxiDma);
+	   if (Status != XST_SUCCESS) {
+	         print("DMA failed selftest\r\n");
+	         return ;
+	    }
+	    print("DMA passed self test\r\n");
+
+	    //polling rather than interrupts
+	    XAxiDma_IntrDisable(&AxiDma, XAXIDMA_IRQ_ALL_MASK,
+	    XAXIDMA_DEVICE_TO_DMA);
+	    XAxiDma_IntrDisable(&AxiDma, XAXIDMA_IRQ_ALL_MASK,
+	    XAXIDMA_DMA_TO_DEVICE);
+
+	    //READ
+	    for (int i = 0; i < BUF_SIZE / BATCH_SIZE; i++) {
+	    	Xil_DCacheFlushRange((UINTPTR)(rx_buf + i * BATCH_SIZE), BATCH_SIZE * 4);
+	    	//sleep(5); //maybe remove
+
+	    	//read from DMA
+	    	Status = XAxiDma_SimpleTransfer(&AxiDma, (UINTPTR) (rx_buf + i * BATCH_SIZE),
+	    		BATCH_SIZE * 4, XAXIDMA_DEVICE_TO_DMA);
+
+	    	if (Status != XST_SUCCESS) {
+	    	            print("failed rx transfer call\r\n");
+	    	}
+	    	else {
+	    		//print("dma read success\r\n");
+	    	}
+
+	    	while (XAxiDma_Busy(&AxiDma, XAXIDMA_DEVICE_TO_DMA)) {
+	    	}
+	    	//print("DMA read completed\r\n");
+
+	    	//flush
+	    	//invalidate instead of flush
+	    	Xil_DCacheFlushRange((UINTPTR)(rx_buf + i * BATCH_SIZE), BATCH_SIZE * 4);
+	    }
+
+	    print("DMA done\r\n");
+
+}
+
+void sd_write(volatile uint32_t *buf, int buf_size, char *name) {
+	FRESULT res;
+	xil_printf("Attempting to open file: %s\n", name);
+	res = f_open(&fil, name, FA_CREATE_ALWAYS | FA_WRITE);
+	xil_printf("f_open returned: %d\n", res);
+	unsigned int br;
+	if(res != FR_OK)
+	  {
+		xil_printf("file creation failed, FRESULT=%d\n", res);
+		print("file creation failed\n");
+	    return ;
+	  }
+	print("File opened successfully\n");
+
+	res = f_lseek(&fil, 0);
+	if (res) {
+		return;
+	}
+
+	//HEADER
+	WAVHeader header;
+	memcpy(header.chunkID, "RIFF", 4);
+	memcpy(header.format, "WAVE", 4);
+	memcpy(header.subChunk1ID, "fmt ", 4);
+	memcpy(header.subchunk2ID, "data", 4);
+
+	header.subchunk1Size = 16;
+	header.audioFormat = 1;
+	header.numChannels = 1; //1 or 2
+	header.sampleRate = SAMPLE_RATE; //sample rate
+	header.bitsPerSample = 32;
+	header.blockAlign = header.numChannels
+						* header.bitsPerSample / 8;
+	header.byteRate = header.sampleRate
+							* header.blockAlign;
+	header.subchunk2Size = buf_size * 4;
+	header.chunkSize = 36 + header.subchunk2Size;
+
+	// Write WAV header
+	res = f_write(&fil, &header, sizeof(WAVHeader), &br);
+	if (res != FR_OK || br != sizeof(WAVHeader)) {
+	    print("failed to write header\n");
+	    f_close(&fil);
+	    return;
+	 }
+
+
+	//write data
+	res = f_write(&fil, (const void*)buf, buf_size * 4, &br) ;
+	if(res != FR_OK){
+		print("file write failed\n");
+	    return ;
+	}
+
+	res = f_close(&fil);
+	if (res) {
+		return;
+	}
+
+	print("file successfully written\n");
+}
+
+int main()
+{
+    init_platform();
+
+    print("Hello World\n");
+    print("Audio Gain Control Demo\n");
+
+    // Set gain from the AUDIO_GAIN configuration variable (defined at top of file)
+    set_audio_gain(AUDIO_GAIN);
+
+    // Optional: Verify the gain was set correctly
+    uint32_t current_gain = get_audio_gain();
+    xil_printf("Current gain readback: 0x%08X\n", current_gain);
+
+    //read from DMA
+    dma();
+
+	//mount sd
+    FRESULT rc;
+    rc = f_mount(&fatfs, "1:/", 1);
+    if (rc != FR_OK) {
+    	print("failed to mount sd card\n");
+        return 0 ;
+    }
+    else {
+    	print("sd is mounted\n");
+    }
+
+    //IMPORTANT: make file system: only needs to be done ONCE. Don't do this on every boot.
+    //uncomment if you use the sd card for the first time
+    //it can take a lot of time (minutes)
+
+    // Initialize mkfs parameters
+    /*
+    memset(&mkfs_parm, 0, sizeof(MKFS_PARM));
+    mkfs_parm.fmt = FM_FAT32;
+    mkfs_parm.n_fat = 1;  // Number of FAT copies
+    mkfs_parm.align = 0;  // Data area alignment (0 = auto)
+    mkfs_parm.n_root = 0; // Number of root directory entries (0 = default)
+    mkfs_parm.au_size = 0; // Allocation unit size (0 = auto)
+
+    BYTE work[FF_MAX_SS];
+    print("Attempting to format SD card to FAT32...\n");
+    rc = f_mkfs("1:/", &mkfs_parm, work, sizeof work);
+
+    if (rc != FR_OK) {
+    	xil_printf("f_mkfs failed, FRESULT=%d\n", rc);
+    	return 0;
+    }
+    else {
+    	xil_printf("successfully made the file system\n");
+    }
+
+    // CRITICAL: Remount the filesystem after formatting
+    f_mount(NULL, "1:/", 0);  // Unmount
+    rc = f_mount(&fatfs, "1:/", 1);  // Remount
+    if (rc != FR_OK) {
+    	xil_printf("failed to remount after format, FRESULT=%d\n", rc);
+    	return 0;
+    }
+    print("sd remounted after format\n");
+    */
+
+    //write dma into file
+    sd_write(rx_buf, BUF_SIZE, "1:/samples.wav");
+
+    print("Successfully ran Hello World application");
+    cleanup_platform();
+    return 0;
+}
