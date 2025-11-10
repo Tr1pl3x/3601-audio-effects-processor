@@ -2,6 +2,7 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- UPDATED: Added cb_effect_sel port for effect selection (3-bit)
 entity ctrl_bus is
 	generic (
         ------------------------------------------------
@@ -23,6 +24,7 @@ entity ctrl_bus is
         cb_control_reg      : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
         cb_status_reg       : in  std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
         cb_gain_reg         : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
+        cb_effect_sel       : out std_logic_vector(2 downto 0);  -- Effect selector (bits 2:0 of control reg)
 
         ------------------------------------------------
         -- AXI Lite signals
@@ -150,6 +152,7 @@ begin
     cb_control_reg  <= slv_reg0;
     slv_reg1        <= cb_status_reg;
     cb_gain_reg     <= slv_reg3;
+    cb_effect_sel   <= slv_reg0(2 downto 0);  -- Extract bits [2:0] for effect selection
 
 	-- Implement axi_awready generation
 	-- axi_awready is asserted for one S_AXI_ACLK clock cycle when both

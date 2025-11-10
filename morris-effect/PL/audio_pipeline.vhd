@@ -87,6 +87,7 @@ architecture Behavioural of audio_pipeline is
     signal sig_control_reg          : std_logic_vector(DATA_WIDTH-1 downto 0);
     signal sig_status_reg           : std_logic_vector(DATA_WIDTH-1 downto 0);
     signal sig_gain_reg             : std_logic_vector(DATA_WIDTH-1 downto 0);
+    signal sig_effect_sel           : std_logic_vector(2 downto 0);
 
     --------------------------------------------------
     -- Audio Effects
@@ -102,7 +103,7 @@ begin
     --------------------------------------------------
     -- Control bus
     --------------------------------------------------
-    inst_ctrl_bus : ctrl_bus
+    inst_ctrl_bus : entity work.ctrl_bus
 	generic map (
 		C_S_AXI_DATA_WIDTH	=> C_S00_AXI_DATA_WIDTH,
 		C_S_AXI_ADDR_WIDTH	=> C_S00_AXI_ADDR_WIDTH
@@ -111,6 +112,7 @@ begin
         cb_control_reg  => sig_control_reg,
         cb_status_reg   => sig_status_reg,
         cb_gain_reg     => sig_gain_reg,
+        cb_effect_sel   => sig_effect_sel,
 
 		S_AXI_ACLK	    => s00_axi_aclk,
 		S_AXI_ARESETN	=> s00_axi_aresetn,
@@ -189,7 +191,7 @@ begin
     sig_effects_in <= sig_fifo_data_r;
     sig_effects_in_valid <= sig_fifo_rd;  -- Valid when we read from FIFO
 
-    inst_audio_effects : audio_effects
+    inst_audio_effects : entity work.audio_effects
     generic map (
         DATA_WIDTH => DATA_WIDTH,
         PCM_PRECISION => PCM_PRECISION,
@@ -200,6 +202,7 @@ begin
         rst => sig_fifo_rst,
         audio_in => sig_effects_in,
         valid_in => sig_effects_in_valid,
+        effect_selector => sig_effect_sel,
         gain_reg => sig_gain_reg,
         audio_out => sig_effects_out,
         valid_out => sig_effects_out_valid

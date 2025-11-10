@@ -47,6 +47,7 @@ MKFS_PARM mkfs_parm;
 //Audio pipeline control registers
 //Base address from xparameters.h: XPAR_AUDIO_PIPELINE_0_BASEADDR
 #define AUDIO_PIPELINE_BASEADDR XPAR_AUDIO_PIPELINE_0_BASEADDR  // 0xA0000000
+#define CONTROL_REG_OFFSET 0x00  // slv_reg0 at offset 0x00 (effect selector in bits [2:0])
 #define GAIN_REG_OFFSET 0x0C  // slv_reg3 at offset 0x0C
 
 //Gain values in Q16.16 fixed-point format
@@ -58,6 +59,25 @@ MKFS_PARM mkfs_parm;
 #define GAIN_2X      0x00020000  // 2.0x - Double volume
 #define GAIN_4X      0x00040000  // 4.0x - Quadruple volume
 #define GAIN_8X      0x00080000  // 8.0x - 8x boost (may clip/saturate)
+
+//Effect selector values (3-bit values for bits [2:0] of control register)
+//These correspond to the effect MUX in audio_effects.vhd
+#define EFFECT_NONE       0  // 000: Bypass - no processing
+#define EFFECT_ECHO       1  // 001: Echo effect (to be implemented by Morris)
+#define EFFECT_GAIN       2  // 010: Gain/volume control
+#define EFFECT_SPEED      3  // 011: Speed up/slow down (to be implemented by Jiatong)
+#define EFFECT_CLIPPING   4  // 100: Clipping (to be implemented by Ayush)
+#define EFFECT_FLANGER    5  // 101: Flanger (to be implemented by Alexandra)
+
+//Effect names for display (matches the order above)
+const char *effect_names[] = {
+    "None (Bypass)",
+    "Echo",
+    "Gain",
+    "Speed",
+    "Clipping",
+    "Flanger"
+};
 
 // ============================================
 // GAIN CONFIGURATION - Change this value to adjust audio volume
@@ -115,6 +135,64 @@ void set_audio_gain(uint32_t gain_value) {
  */
 uint32_t get_audio_gain(void) {
     return Xil_In32(AUDIO_PIPELINE_BASEADDR + GAIN_REG_OFFSET);
+}
+
+/**
+ * Set the active audio effect via memory-mapped register write
+ * @param effect_id: Effect selector value (0-5)
+ *                   Use predefined constants (EFFECT_NONE, EFFECT_ECHO, etc.)
+ *
+ * Effect IDs:
+ *   0 = None (Bypass)
+ *   1 = Echo
+ *   2 = Gain
+ *   3 = Speed up/down
+ *   4 = Clipping
+ *   5 = Flanger
+ *
+ * Example usage:
+ *   set_audio_effect(EFFECT_GAIN);    // Enable gain effect
+ *   set_audio_effect(EFFECT_NONE);    // Bypass all effects
+ *   set_audio_effect(EFFECT_ECHO);    // Enable echo effect
+ */
+void set_audio_effect(uint8_t effect_id) {
+    // Ensure effect_id is in valid range (0-5)
+    if (effect_id > 5) {
+        xil_printf("Invalid effect ID: %d. Must be 0-5.\r\n", effect_id);
+        return;
+    }
+
+    // Read current control register value
+    uint32_t control_reg = Xil_In32(AUDIO_PIPELINE_BASEADDR + CONTROL_REG_OFFSET);
+
+    // Clear bits [2:0] and set new effect selector
+    control_reg = (control_reg & 0xFFFFFFF8) | (effect_id & 0x07);
+
+    // Write back to control register
+    Xil_Out32(AUDIO_PIPELINE_BASEADDR + CONTROL_REG_OFFSET, control_reg);
+
+    xil_printf("Effect changed to: %s (ID=%d)\r\n", effect_names[effect_id], effect_id);
+}
+
+/**
+ * Read current effect selection from hardware register
+ * @return current effect ID (0-5)
+ */
+uint8_t get_audio_effect(void) {
+    uint32_t control_reg = Xil_In32(AUDIO_PIPELINE_BASEADDR + CONTROL_REG_OFFSET);
+    return (uint8_t)(control_reg & 0x07);  // Extract bits [2:0]
+}
+
+/**
+ * Cycle to the next effect in the sequence
+ * Effect cycle: None -> Echo -> Gain -> Speed -> Clipping -> Flanger -> (repeat)
+ *
+ * This function is designed to be called from a button press interrupt handler
+ */
+void cycle_to_next_effect(void) {
+    uint8_t current_effect = get_audio_effect();
+    uint8_t next_effect = (current_effect + 1) % 6;  // Cycle 0->1->2->3->4->5->0
+    set_audio_effect(next_effect);
 }
 
 void dma() {
@@ -248,19 +326,60 @@ void sd_write(volatile uint32_t *buf, int buf_size, char *name) {
 	print("file successfully written\n");
 }
 
+/**
+ * ============================================================================
+ * BUTTON CONTROL (TODO - To be implemented in Week 3)
+ * ============================================================================
+ *
+ * To enable runtime effect cycling with PMOD button:
+ *
+ * 1. Add AXI GPIO IP in Vivado block design for button input
+ * 2. Include xgpio.h header
+ * 3. Initialize GPIO instance:
+ *    XGpio button_gpio;
+ *    XGpio_Initialize(&button_gpio, XPAR_AXI_GPIO_0_DEVICE_ID);
+ *    XGpio_SetDataDirection(&button_gpio, 1, 0xFFFFFFFF);  // All inputs
+ *
+ * 4. Option A: Polling mode (simple)
+ *    while(1) {
+ *        if (XGpio_DiscreteRead(&button_gpio, 1) & 0x01) {  // Button pressed
+ *            cycle_to_next_effect();
+ *            usleep(200000);  // Debounce delay (200ms)
+ *        }
+ *    }
+ *
+ * 5. Option B: Interrupt mode (better)
+ *    - Enable GPIO interrupt
+ *    - Register interrupt handler that calls cycle_to_next_effect()
+ *    - Implement debouncing in ISR
+ *
+ * For now, you can manually test effect switching by calling:
+ *   set_audio_effect(EFFECT_ECHO);    // Test echo
+ *   set_audio_effect(EFFECT_FLANGER); // Test flanger
+ *   etc.
+ */
+
 int main()
 {
     init_platform();
 
     print("Hello World\n");
-    print("Audio Gain Control Demo\n");
+    print("Audio Effects Processor Demo\n");
+    print("========================================\n");
+
+    // Initialize effect selector to Gain effect (default)
+    // You can change this to test different effects before recording
+    set_audio_effect(EFFECT_GAIN);  // Start with gain effect
 
     // Set gain from the AUDIO_GAIN configuration variable (defined at top of file)
     set_audio_gain(AUDIO_GAIN);
 
-    // Optional: Verify the gain was set correctly
+    // Optional: Verify the settings were applied correctly
+    uint8_t current_effect = get_audio_effect();
     uint32_t current_gain = get_audio_gain();
-    xil_printf("Current gain readback: 0x%08X\n", current_gain);
+    xil_printf("Current effect: %s (ID=%d)\n", effect_names[current_effect], current_effect);
+    xil_printf("Current gain: 0x%08X\n", current_gain);
+    print("========================================\n");
 
     //read from DMA
     dma();

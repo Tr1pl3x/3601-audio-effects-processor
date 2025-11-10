@@ -5,19 +5,29 @@ use ieee.numeric_std.all;
 library work;
 use work.aud_param.all;
 
--- Audio Effects Pipeline
--- Modular architecture for chaining multiple audio effects
--- Currently implements: Gain control
--- Future effects can be easily added by inserting modules in the chain
+-- Audio Effects Pipeline with MUX Selection
+-- Architecture: All effects run in parallel, MUX selects which one to output
+-- Currently implements: Bypass (None) and Gain control
+-- Other effects: Echo, Speed up/down, Clipping, Flanger (to be added by teammates)
 --
--- Effects Chain Flow:
---   Input → Gain Effect → [Future Effect 1] → [Future Effect 2] → Output
+-- Effects Selection Flow:
+--   Input → [Bypass | Echo | Gain | Speed | Clipping | Flanger] → MUX → Output
+--                                                                    ↑
+--                                                              effect_selector
+--
+-- Effect Selector Values (3-bit):
+--   0: None (Bypass - audio passes through unchanged)
+--   1: Echo
+--   2: Gain
+--   3: Speed up/Slow down
+--   4: Clipping
+--   5: Flanger
 --
 -- To add a new effect:
---   1. Create new effect module (e.g., echo_effect.vhd)
+--   1. Create effect module (e.g., echo_effect.vhd)
 --   2. Add component declaration in params.vhd
---   3. Instantiate in this file between existing effects
---   4. Add control registers in ctrl_bus.vhd if needed
+--   3. Instantiate in this file
+--   4. Connect to MUX in process
 
 entity audio_effects is
     generic (
@@ -33,11 +43,17 @@ entity audio_effects is
         audio_in    : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
         valid_in    : in  std_logic;
 
-        -- Control signals from AXI4-Lite registers
+        -- Effect selector (from PS via AXI4-Lite)
+        -- 000: None/Bypass, 001: Echo, 010: Gain, 011: Speed, 100: Clipping, 101: Flanger
+        effect_selector : in  std_logic_vector(2 downto 0);
+
+        -- Control registers for each effect
         gain_reg    : in  std_logic_vector(GAIN_WIDTH - 1 downto 0);
-        -- Add more control registers here for future effects:
-        -- eq_reg      : in  std_logic_vector(31 downto 0);
-        -- reverb_reg  : in  std_logic_vector(31 downto 0);
+        -- Future effect control registers:
+        -- echo_reg    : in  std_logic_vector(31 downto 0);
+        -- speed_reg   : in  std_logic_vector(31 downto 0);
+        -- clip_reg    : in  std_logic_vector(31 downto 0);
+        -- flanger_reg : in  std_logic_vector(31 downto 0);
 
         -- Output audio stream to AXI4-Stream
         audio_out   : out std_logic_vector(DATA_WIDTH - 1 downto 0);
@@ -46,22 +62,79 @@ entity audio_effects is
 end audio_effects;
 
 architecture Behavioral of audio_effects is
-    -- Signals for effect chain
-    -- Naming convention: effect_name_out, effect_name_valid
+    -- Signals for parallel effects outputs
+    -- Each effect runs in parallel, MUX selects which one to use
 
-    -- After gain effect
+    -- Bypass (None) - just delay to match other effects' latency
+    signal bypass_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal bypass_valid : std_logic;
+    signal bypass_stage1, bypass_stage2, bypass_stage3 : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal bypass_valid_stage1, bypass_valid_stage2, bypass_valid_stage3 : std_logic;
+
+    -- Echo effect output
+    signal echo_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal echo_valid : std_logic;
+
+    -- Gain effect output
     signal gain_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
     signal gain_valid : std_logic;
 
-    -- Add more intermediate signals here for future effects:
-    -- signal eq_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
-    -- signal eq_valid : std_logic;
-    -- signal reverb_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
-    -- signal reverb_valid : std_logic;
+    -- Speed up/down effect output
+    signal speed_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal speed_valid : std_logic;
+
+    -- Clipping effect output
+    signal clipping_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal clipping_valid : std_logic;
+
+    -- Flanger effect output
+    signal flanger_out : std_logic_vector(DATA_WIDTH - 1 downto 0);
+    signal flanger_valid : std_logic;
 
 begin
 
-    -- Effect 1: Gain Control
+    ----------------------------------------------------------------------------
+    -- Bypass Path (None) - 3-stage pipeline to match gain effect latency
+    ----------------------------------------------------------------------------
+    bypass_pipeline : process(clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                bypass_stage1 <= (others => '0');
+                bypass_stage2 <= (others => '0');
+                bypass_stage3 <= (others => '0');
+                bypass_valid_stage1 <= '0';
+                bypass_valid_stage2 <= '0';
+                bypass_valid_stage3 <= '0';
+            else
+                -- Stage 1
+                bypass_stage1 <= audio_in;
+                bypass_valid_stage1 <= valid_in;
+
+                -- Stage 2
+                bypass_stage2 <= bypass_stage1;
+                bypass_valid_stage2 <= bypass_valid_stage1;
+
+                -- Stage 3
+                bypass_stage3 <= bypass_stage2;
+                bypass_valid_stage3 <= bypass_valid_stage2;
+            end if;
+        end if;
+    end process;
+
+    bypass_out <= bypass_stage3;
+    bypass_valid <= bypass_valid_stage3;
+
+    ----------------------------------------------------------------------------
+    -- Effect 1: Echo (Placeholder - pass-through for now)
+    -- TODO: Morris will implement echo_effect.vhd
+    ----------------------------------------------------------------------------
+    echo_out <= audio_in;  -- Placeholder - just pass through
+    echo_valid <= valid_in;
+
+    ----------------------------------------------------------------------------
+    -- Effect 2: Gain Control (Already implemented)
+    ----------------------------------------------------------------------------
     gain_effect_inst : gain_effect
         generic map (
             DATA_WIDTH => DATA_WIDTH,
@@ -78,45 +151,64 @@ begin
             valid_out => gain_valid
         );
 
-    -- Effect 2: [Future Effect - Placeholder]
-    -- Example: EQ or Filter
-    -- eq_effect_inst : eq_effect
-    --     generic map (
-    --         DATA_WIDTH => DATA_WIDTH
-    --     )
-    --     port map (
-    --         clk => clk,
-    --         rst => rst,
-    --         audio_in => gain_out,        -- Chain from previous effect
-    --         valid_in => gain_valid,
-    --         eq_coeff => eq_reg,
-    --         audio_out => eq_out,
-    --         valid_out => eq_valid
-    --     );
+    ----------------------------------------------------------------------------
+    -- Effect 3: Speed up/Slow down (Placeholder - pass-through for now)
+    -- TODO: Jiatong Li will implement speed_effect.vhd
+    ----------------------------------------------------------------------------
+    speed_out <= audio_in;  -- Placeholder - just pass through
+    speed_valid <= valid_in;
 
-    -- Effect 3: [Future Effect - Placeholder]
-    -- Example: Reverb or Echo
-    -- reverb_effect_inst : reverb_effect
-    --     generic map (
-    --         DATA_WIDTH => DATA_WIDTH
-    --     )
-    --     port map (
-    --         clk => clk,
-    --         rst => rst,
-    --         audio_in => eq_out,          -- Chain from previous effect
-    --         valid_in => eq_valid,
-    --         reverb_time => reverb_reg,
-    --         audio_out => reverb_out,
-    --         valid_out => reverb_valid
-    --     );
+    ----------------------------------------------------------------------------
+    -- Effect 4: Clipping (Placeholder - pass-through for now)
+    -- TODO: Ayush will implement clipping_effect.vhd
+    ----------------------------------------------------------------------------
+    clipping_out <= audio_in;  -- Placeholder - just pass through
+    clipping_valid <= valid_in;
 
-    -- Final output assignment
-    -- Update this when adding new effects to chain from the last effect
-    audio_out <= gain_out;
-    valid_out <= gain_valid;
+    ----------------------------------------------------------------------------
+    -- Effect 5: Flanger (Placeholder - pass-through for now)
+    -- TODO: Alexandra will implement flanger_effect.vhd
+    ----------------------------------------------------------------------------
+    flanger_out <= audio_in;  -- Placeholder - just pass through
+    flanger_valid <= valid_in;
 
-    -- When adding effects, update to:
-    -- audio_out <= reverb_out;
-    -- valid_out <= reverb_valid;
+    ----------------------------------------------------------------------------
+    -- Output MUX: Select which effect to use based on effect_selector
+    ----------------------------------------------------------------------------
+    effect_mux : process(effect_selector, bypass_out, bypass_valid,
+                         echo_out, echo_valid, gain_out, gain_valid,
+                         speed_out, speed_valid, clipping_out, clipping_valid,
+                         flanger_out, flanger_valid)
+    begin
+        case effect_selector is
+            when "000" =>  -- None/Bypass
+                audio_out <= bypass_out;
+                valid_out <= bypass_valid;
+
+            when "001" =>  -- Echo
+                audio_out <= echo_out;
+                valid_out <= echo_valid;
+
+            when "010" =>  -- Gain
+                audio_out <= gain_out;
+                valid_out <= gain_valid;
+
+            when "011" =>  -- Speed up/Slow down
+                audio_out <= speed_out;
+                valid_out <= speed_valid;
+
+            when "100" =>  -- Clipping
+                audio_out <= clipping_out;
+                valid_out <= clipping_valid;
+
+            when "101" =>  -- Flanger
+                audio_out <= flanger_out;
+                valid_out <= flanger_valid;
+
+            when others =>  -- Default to bypass
+                audio_out <= bypass_out;
+                valid_out <= bypass_valid;
+        end case;
+    end process;
 
 end Behavioral;

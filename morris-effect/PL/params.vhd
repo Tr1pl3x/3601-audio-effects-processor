@@ -93,6 +93,7 @@ package aud_param is
             cb_control_reg      : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
             cb_status_reg       : in  std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
             cb_gain_reg         : out std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
+            cb_effect_sel       : out std_logic_vector(2 downto 0);
 
             ------------------------------------------------
             -- AXI Lite signals
@@ -184,13 +185,14 @@ package aud_param is
             GAIN_WIDTH : natural := 32
         );
         port (
-            clk         : in  std_logic;
-            rst         : in  std_logic;
-            audio_in    : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
-            valid_in    : in  std_logic;
-            gain_reg    : in  std_logic_vector(GAIN_WIDTH - 1 downto 0);
-            audio_out   : out std_logic_vector(DATA_WIDTH - 1 downto 0);
-            valid_out   : out std_logic
+            clk             : in  std_logic;
+            rst             : in  std_logic;
+            audio_in        : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
+            valid_in        : in  std_logic;
+            effect_selector : in  std_logic_vector(2 downto 0);
+            gain_reg        : in  std_logic_vector(GAIN_WIDTH - 1 downto 0);
+            audio_out       : out std_logic_vector(DATA_WIDTH - 1 downto 0);
+            valid_out       : out std_logic
         );
     end component;
 
