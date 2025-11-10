@@ -26,7 +26,7 @@
 //file buffer
 #define BUF_SIZE 28800000 //48000 * 600 (time limit is 10 minutes)
 #define BATCH_SIZE 1024
-#define SAMPLES_READ_AT_ONCE 100
+#define SAMPLES_READ_AT_ONCE 125
 volatile uint32_t rx_buf[BUF_SIZE] = {};
 
 //For axi dma 
